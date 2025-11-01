@@ -256,7 +256,7 @@ def main():
     try:
         while True:
             if position["side"] == 'none':
-                best_symbol, signal = scan_for_best_signal(target_symbols)
+                signal, best_symbol = scan_for_best_signal(target_symbols)
 
                 if isinstance(best_symbol, str) and signal != 'hold': 
                     try: 
