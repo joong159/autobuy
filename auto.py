@@ -271,10 +271,10 @@ def main():
                             amount_to_order = (order_amount_usdt * leverage) / current_price
 
                             # 실제 주문 실행 (주석 해제 필요)
-                            # if signal == 'long':
-                            #     exchange.create_market_buy_order(best_symbol, amount_to_order)
-                            # elif signal == 'short':
-                            #     exchange.create_market_sell_order(best_symbol, amount_to_order)
+                            if signal == 'long':
+                                 exchange.create_market_buy_order(best_symbol, amount_to_order)
+                            elif signal == 'short':
+                                 exchange.create_market_sell_order(best_symbol, amount_to_order)
 
                             position = {"side": signal, "symbol": best_symbol, "entry_price": current_price, "amount": amount_to_order, "order_amount_usdt": order_amount_usdt}
                             message = f"**[🚀 포지션 진입]**\n- 종목: `{best_symbol}`\n- 포지션: `{signal.upper()}`\n- 진입가: `${current_price:,.4f}`\n- 진입 금액: `${order_amount_usdt:,.2f}`"
@@ -310,10 +310,10 @@ def main():
                          is_take_profit = (position["side"] == 'long' and current_price >= tp_price) or (position["side"] == 'short' and current_price <= tp_price)
 
                          # 실제 청산 주문 실행 (주석 해제 필요)
-                         # if position["side"] == 'long':
-                         #     exchange.create_market_sell_order(position['symbol'], position['amount'], {'reduceOnly': True})
-                         # elif position["side"] == 'short':
-                         #     exchange.create_market_buy_order(position['symbol'], position['amount'], {'reduceOnly': True})
+                         if position["side"] == 'long':
+                              exchange.create_market_sell_order(position['symbol'], position['amount'], {'reduceOnly': True})
+                         elif position["side"] == 'short':
+                              exchange.create_market_buy_order(position['symbol'], position['amount'], {'reduceOnly': True})
 
                          if is_take_profit:
                              result_type = "🎉 익절"; profit_loss_usd = position["order_amount_usdt"] * target_profit_ratio
