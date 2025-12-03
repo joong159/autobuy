@@ -88,10 +88,20 @@ def add_indicators(df):
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / loss)))
+
+    # <<< 여기부터 수정됨: 상단선(bb_upper)과 하단선(bb_lower)을 명시적으로 계산하여 저장 >>>
     df['bb_mid'] = df['close'].rolling(window=bb_period).mean()
     df['bb_std'] = df['close'].rolling(window=bb_period).std()
-    df['bb_width'] = ((df['bb_mid'] + (df['bb_std'] * bb_std_dev)) - (df['bb_mid'] - (df['bb_std'] * bb_std_dev))) / df['bb_mid']
+    
+    df['bb_upper'] = df['bb_mid'] + (df['bb_std'] * bb_std_dev) # 상단선 저장
+    df['bb_lower'] = df['bb_mid'] - (df['bb_std'] * bb_std_dev) # 하단선 저장
+    
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid'] # 저장된 값으로 폭 계산
+    # <<< 수정 끝 >>>
+
     df['avg_volume'] = df['volume'].rolling(window=20).mean()
+    
+    # ADX 계산
     high_minus_low = df['high'] - df['low']
     high_minus_prev_close = abs(df['high'] - df['close'].shift(1))
     low_minus_prev_close = abs(df['low'] - df['close'].shift(1))
@@ -106,6 +116,7 @@ def add_indicators(df):
     df['-DI'] = (df['-DM'].ewm(alpha=1/adx_period, min_periods=adx_period, adjust=False).mean() / df['ATR']) * 100
     df['DX'] = (abs(df['+DI'] - df['-DI']) / (abs(df['+DI'] + df['-DI']) + 1e-6)) * 100
     df['ADX'] = df['DX'].ewm(alpha=1/adx_period, min_periods=adx_period, adjust=False).mean()
+    
     return df
 
 def get_long_term_trend(df):
@@ -124,103 +135,96 @@ def reset_signal_state(symbol):
     signal_states[symbol] = {"is_observing": False, "candles_since_start": 0, "signal_type": None, "checklist": {}}
 
 def scan_for_best_signal(symbols_to_scan):
+    """상승/하락/횡보 모든 시장 상황에 맞춰 최적의 진입 신호를 찾습니다."""
     best_signal, best_symbol, max_volume = 'hold', None, 0
-    discord_messages = ["------------------ 🤖 스마트 전략 스캐너 작동 ------------------\n"]
+    discord_messages = ["------------------ 🤖 전천후(All-Weather) 스캐너 작동 ------------------\n"]
 
     for symbol in symbols_to_scan:
-        state = signal_states[symbol]
+        # 1. 데이터 준비
         df_long = get_market_data(symbol, long_term_timeframe, max(ma_periods) + 1)
         long_term_trend = get_long_term_trend(df_long)
         
-        # add_indicators 호출은 한번만 하도록 수정
-        if df_long is not None:
-             df_long = add_indicators(df_long)
-             current_adx = df_long.iloc[-1]['ADX'] if 'ADX' in df_long.columns and not pd.isna(df_long.iloc[-1]['ADX']) else 0
-             market_condition = '돌파' if current_adx > adx_threshold else '반등'
-        else:
-             long_term_trend = 'hold' # 데이터 없으면 hold 처리
-             current_adx = 0
-             market_condition = '반등' # 기본값
+        df_long = add_indicators(df_long)
+        current_adx = df_long.iloc[-1]['ADX'] if 'ADX' in df_long.columns and not pd.isna(df_long.iloc[-1]['ADX']) else 0
         
-        log_details = f"장기추세: {long_term_trend} | **매매법: {market_condition}**(ADX:{current_adx:.1f})"
+        # 시장 상황 판단 (추세장 vs 횡보장)
+        market_condition = '돌파' if current_adx > adx_threshold else '반등'
+        
+        log_details = f"장기추세: {long_term_trend} | 모드: {market_condition}(ADX:{current_adx:.1f})"
         
         df_short = get_market_data(symbol, timeframe, max(ma_periods) + 20)
+        
         if df_short is not None and len(df_short) >= max(ma_periods):
             df_short = add_indicators(df_short)
             if not df_short.iloc[-1].isnull().any():
                 latest = df_short.iloc[-1]
                 previous = df_short.iloc[-2]
 
-                # --- 상세 분석 로그 생성 (항상 실행) ---
-                volume_check = latest['volume'] > latest['avg_volume'] * volume_multiplier if not pd.isna(latest['avg_volume']) else False
-                bb_check = latest['bb_width'] > df_short['bb_width'].iloc[-5:-1].mean() if not pd.isna(latest['bb_width']) else False
+                # --- 공통 지표 정의 ---
+                # 거래량 체크 (횡보장에서는 거래량 조건 완화: 1.2배)
+                vol_mult = volume_multiplier if long_term_trend != 'hold' else 1.2
+                volume_check = latest['volume'] > latest['avg_volume'] * vol_mult
+                bb_check = latest['bb_width'] > df_short['bb_width'].iloc[-5:-1].mean()
                 
-                # 로그 생성을 위한 변수 초기화
-                ma_short_check_up = ma_short_check_down = False
-                rsi_check_up = rsi_check_down = False
-                vwma_breakout_up = vwma_breakout_down = False
-                vwma_bounce_up = vwma_bounce_down = False
-
-                if not pd.isna(latest['ma7']) and not pd.isna(latest['ma15']):
-                    ma_short_check_up = latest['ma7'] > latest['ma15']
-                    ma_short_check_down = latest['ma7'] < latest['ma15']
-                if not pd.isna(latest['rsi']):
-                    rsi_check_up = latest['rsi'] < rsi_overbought
-                    rsi_check_down = latest['rsi'] > rsi_oversold
-                if not pd.isna(latest['vwma']) and not pd.isna(previous['vwma']):
-                    vwma_breakout_up = latest['close'] > latest['vwma'] and previous['close'] <= latest['vwma']
-                    vwma_bounce_up = previous['close'] > previous['vwma'] and latest['low'] <= latest['vwma'] and latest['close'] > latest['vwma']
-                    vwma_breakout_down = latest['close'] < latest['vwma'] and previous['close'] >= latest['vwma']
-                    vwma_bounce_down = previous['close'] < previous['vwma'] and latest['high'] >= latest['vwma'] and latest['close'] < latest['vwma']
-
+                # --- [상황 1] 상승장 (UP) ---
                 if long_term_trend == 'up':
-                    if market_condition == '돌파':
-                        log_details += f" | MA(7>15):{'✅' if ma_short_check_up else '❌'} | VWMA(↗️):{'✅' if vwma_breakout_up else '❌'} | 거래량:{'✅' if volume_check else '❌'} | RSI(<70):{'✅' if rsi_check_up else '❌'} | BB확장:{'✅' if bb_check else '❌'}"
-                    elif market_condition == '반등':
-                        log_details += f" | MA(7>15):{'✅' if ma_short_check_up else '❌'} | VWMA(🤸):{'✅' if vwma_bounce_up else '❌'} | 거래량:{'✅' if volume_check else '❌'} | RSI(<70):{'✅' if rsi_check_up else '❌'} | BB확장:{'✅' if bb_check else '❌'}"
-                elif long_term_trend == 'down':
-                    if market_condition == '돌파':
-                        log_details += f" | MA(7<15):{'✅' if ma_short_check_down else '❌'} | VWMA(↘️):{'✅' if vwma_breakout_down else '❌'} | 거래량:{'✅' if volume_check else '❌'} | RSI(>30):{'✅' if rsi_check_down else '❌'}"
-                    elif market_condition == '반등':
-                        log_details += f" | MA(7<15):{'✅' if ma_short_check_down else '❌'} | VWMA(🤕):{'✅' if vwma_bounce_down else '❌'} | 거래량:{'✅' if volume_check else '❌'} | RSI(>30):{'✅' if rsi_check_down else '❌'}"
-
-                # --- 실제 진입 결정 ---
-                if long_term_trend != 'hold':
-                    signal_found = False
-                    if market_condition == '돌파':
-                        if long_term_trend == 'up' and ma_short_check_up and vwma_breakout_up and volume_check and rsi_check_up and bb_check: signal_found = True
-                        elif long_term_trend == 'down' and ma_short_check_down and vwma_breakout_down and volume_check and rsi_check_down: signal_found = True
-                    elif market_condition == '반등':
-                        if long_term_trend == 'up' and ma_short_check_up and vwma_bounce_up and volume_check and rsi_check_up and bb_check: signal_found = True
-                        elif long_term_trend == 'down' and ma_short_check_down and vwma_bounce_down and volume_check and rsi_check_down: signal_found = True
+                    ma_short_check = latest['ma7'] > latest['ma15']
+                    vwma_break = latest['close'] > latest['vwma'] and previous['close'] <= latest['vwma'] # 돌파
+                    vwma_bounce = previous['close'] > previous['vwma'] and latest['low'] <= latest['vwma'] and latest['close'] > latest['vwma'] # 지지
                     
-                    if signal_found:
-                        signal_type = 'long' if long_term_trend == 'up' else 'short'
-                        current_volume = latest['volume'] if not pd.isna(latest['volume']) else 0
-                        if current_volume > max_volume:
-                            max_volume, best_signal, best_symbol = current_volume, signal_type, symbol
-            else:
-                 log_details += " | 5분봉 데이터 부족"
-        else:
-             log_details += " | 1시간봉 데이터 부족"
+                    if market_condition == '돌파':
+                        log_details += f" | 롱(돌파)대기.. VWMA(↗️):{'✅' if vwma_break else '❌'}"
+                        if ma_short_check and vwma_break and volume_check and bb_check:
+                            if latest['volume'] > max_volume: max_volume, best_signal, best_symbol = latest['volume'], 'long', symbol
+                    elif market_condition == '반등':
+                        log_details += f" | 롱(눌림)대기.. VWMA(🤸):{'✅' if vwma_bounce else '❌'}"
+                        if ma_short_check and vwma_bounce and volume_check:
+                            if latest['volume'] > max_volume: max_volume, best_signal, best_symbol = latest['volume'], 'long', symbol
 
+                # --- [상황 2] 하락장 (DOWN) ---
+                elif long_term_trend == 'down':
+                    ma_short_check = latest['ma7'] < latest['ma15']
+                    vwma_break = latest['close'] < latest['vwma'] and previous['close'] >= latest['vwma'] # 돌파
+                    vwma_bounce = previous['close'] < previous['vwma'] and latest['high'] >= latest['vwma'] and latest['close'] < latest['vwma'] # 저항
+
+                    if market_condition == '돌파':
+                        log_details += f" | 숏(돌파)대기.. VWMA(↘️):{'✅' if vwma_break else '❌'}"
+                        if ma_short_check and vwma_break and volume_check:
+                            if latest['volume'] > max_volume: max_volume, best_signal, best_symbol = latest['volume'], 'short', symbol
+                    elif market_condition == '반등':
+                        log_details += f" | 숏(저항)대기.. VWMA(🤕):{'✅' if vwma_bounce else '❌'}"
+                        if ma_short_check and vwma_bounce and volume_check:
+                            if latest['volume'] > max_volume: max_volume, best_signal, best_symbol = latest['volume'], 'short', symbol
+
+                # --- [상황 3] 횡보장 (HOLD) - 신규 추가된 박스권 매매 ---
+                else:
+                    long_term_trend == 'hold'
+                    # 볼린저 밴드 역추세 매매 (하단 터치시 롱, 상단 터치시 숏)
+                    bb_lower_hit = previous['close'] < previous['bb_lower'] and latest['close'] > latest['bb_lower'] # 하단 뚫고 복귀
+                    bb_upper_hit = previous['close'] > previous['bb_upper'] and latest['close'] < latest['bb_upper'] # 상단 뚫고 복귀
+                    rsi_low = latest['rsi'] < 35  # 과매도
+                    rsi_high = latest['rsi'] > 65 # 과매수
+
+                    # 횡보장에서는 ADX가 낮아야 안전함
+                    if current_adx < 25:
+                        if bb_lower_hit and rsi_low:
+                            log_details += f" | 박스권 롱:{'✅'} (BB하단+과매도)"
+                            if latest['volume'] > max_volume: max_volume, best_signal, best_symbol = latest['volume'], 'long', symbol
+                        elif bb_upper_hit and rsi_high:
+                            log_details += f" | 박스권 숏:{'✅'} (BB상단+과매수)"
+                            if latest['volume'] > max_volume: max_volume, best_signal, best_symbol = latest['volume'], 'short', symbol
+                        else:
+                            log_details += f" | 박스권 관망 (BB터치대기)"
+                    else:
+                        log_details += f" | 혼조세 관망 (ADX높음)"
 
         terminal_log = f"[{symbol}] 스캔 중... {log_details}"
         print(terminal_log)
         discord_messages.append(f"**[{symbol}]** {log_details}")
-        time.sleep(1) # API 요청 제한 방지 딜레이를 1초로 줄임 (enableRateLimit 사용 중이므로)
+        time.sleep(1)
             
     if best_symbol:
-        df_long_final = get_market_data(best_symbol, long_term_timeframe, max(ma_periods) + 1)
-        # Check if df_long_final is valid before proceeding
-        if df_long_final is not None and not df_long_final.empty:
-            df_long_final = add_indicators(df_long_final)
-            final_adx = df_long_final.iloc[-1]['ADX'] if 'ADX' in df_long_final.columns and not pd.isna(df_long_final.iloc[-1]['ADX']) else 0
-            final_market_condition = '돌파' if final_adx > adx_threshold else '반등'
-            result_message = f"✅ **최적 종목 발견:** `[{best_symbol}]` | **신호:** `{best_signal}` | **매매법:** `{final_market_condition}`"
-        else:
-             result_message = f"✅ **최적 종목 발견:** `[{best_symbol}]` | **신호:** `{best_signal}` | **매매법:** 정보 조회 불가"
-
+        result_message = f"✅ **최적 종목 발견:** `[{best_symbol}]` | **신호:** `{best_signal}`"
     else: 
         result_message = "...진입 가능한 종목 없음..."
     
@@ -229,7 +233,6 @@ def scan_for_best_signal(symbols_to_scan):
     send_discord_message("\n".join(discord_messages))
     
     return best_signal, best_symbol
-
 # -----------------------------------------------------------------------------
 # |                         자동매매 메인 실행 루프                           |
 # -----------------------------------------------------------------------------
